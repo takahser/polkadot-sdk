@@ -32,7 +32,7 @@ use sc_network::{
 	types::ProtocolName,
 	Multiaddr, NetworkBlock, NetworkEventStream, NetworkNotification, NetworkPeers,
 	NetworkSyncForkRequest, NotificationSenderError, NotificationSenderT as NotificationSender,
-	PeerId, ReputationChange,
+	ReputationChange,
 };
 use sc_network_common::{
 	role::{ObservedRole, Roles},
@@ -40,6 +40,7 @@ use sc_network_common::{
 };
 use sc_network_gossip::Validator;
 use sc_network_test::{Block, Hash};
+use sc_network_types::PeerId;
 use sc_utils::mpsc::{tracing_unbounded, TracingUnboundedReceiver, TracingUnboundedSender};
 use sp_consensus_grandpa::AuthorityList;
 use sp_keyring::Ed25519Keyring;
