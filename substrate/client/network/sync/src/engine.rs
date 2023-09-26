@@ -51,9 +51,7 @@ use schnellru::{ByLength, LruMap};
 use sc_client_api::{BlockBackend, HeaderBackend, ProofProvider};
 use sc_consensus::import_queue::ImportQueueService;
 use sc_network::{
-	config::{
-		FullNetworkConfiguration, NonReservedPeerMode, NotificationHandshake, ProtocolId, SetConfig,
-	},
+	config::{FullNetworkConfiguration, NotificationHandshake, ProtocolId, SetConfig},
 	peer_store::{PeerStoreHandle, PeerStoreProvider},
 	request_responses::{IfDisconnected, RequestFailure},
 	service::traits::{Direction, NotificationConfig, NotificationEvent, ValidationResult},
@@ -455,6 +453,7 @@ where
 					.ok()
 					.flatten()
 					.expect("Genesis block exists; qed"),
+				&net_config.network_config.default_peers_set,
 			);
 		let block_announce_protocol_name = block_announce_config.protocol_name().clone();
 
@@ -1393,6 +1392,7 @@ where
 		best_number: NumberFor<B>,
 		best_hash: B::Hash,
 		genesis_hash: B::Hash,
+		set_config: &SetConfig,
 	) -> (N::NotificationProtocolConfig, Box<dyn NotificationService>) {
 		let block_announces_protocol = {
 			let genesis_hash = genesis_hash.as_ref();
@@ -1419,12 +1419,14 @@ where
 			))),
 			// NOTE: `set_config` will be ignored by `protocol.rs` as the block announcement
 			// protocol is still hardcoded into the peerset.
-			SetConfig {
-				in_peers: 0,
-				out_peers: 0,
-				reserved_nodes: Vec::new(),
-				non_reserved_mode: NonReservedPeerMode::Deny,
-			},
+			// TODO: update comment to reflect reality
+			set_config.clone(),
+			// SetConfig {
+			// 	in_peers: 0,
+			// 	out_peers: 0,
+			// 	reserved_nodes: Vec::new(),
+			// 	non_reserved_mode: NonReservedPeerMode::Deny,
+			// },
 		)
 	}
 
