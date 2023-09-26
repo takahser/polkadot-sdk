@@ -31,7 +31,9 @@ use node_primitives::Block;
 use sc_client_api::{Backend, BlockBackend};
 use sc_consensus_babe::{self, SlotProportion};
 use sc_executor::NativeElseWasmExecutor;
-use sc_network::{event::Event, NetworkEventStream, NetworkService};
+use sc_network::{
+	event::Event, service::traits::NetworkService, NetworkBackend, NetworkEventStream,
+};
 use sc_network_sync::{warp::WarpSyncParams, SyncingService};
 use sc_service::{config::Configuration, error::Error as ServiceError, RpcHandlers, TaskManager};
 use sc_statement_store::Store as StatementStore;
@@ -314,7 +316,7 @@ pub struct NewFullBase {
 	/// The client instance of the node.
 	pub client: Arc<FullClient>,
 	/// The networking service of the node.
-	pub network: Arc<NetworkService<Block, <Block as BlockT>::Hash>>,
+	pub network: Arc<dyn NetworkService>,
 	/// The syncing service of the node.
 	pub sync: Arc<SyncingService<Block>>,
 	/// The transaction pool of the node.
@@ -324,7 +326,7 @@ pub struct NewFullBase {
 }
 
 /// Creates a full service from the configuration.
-pub fn new_full_base(
+pub fn new_full_base<N: NetworkBackend<Block, <Block as BlockT>::Hash>>(
 	config: Configuration,
 	disable_hardware_benchmarks: bool,
 	with_startup_data: impl FnOnce(
@@ -352,18 +354,19 @@ pub fn new_full_base(
 
 	let shared_voter_state = rpc_setup;
 	let auth_disc_publish_non_global_ips = config.network.allow_non_globals_in_dht;
-	let mut net_config = sc_network::config::FullNetworkConfiguration::new(&config.network);
+	let mut net_config =
+		sc_network::config::FullNetworkConfiguration::<_, _, N>::new(&config.network);
 
 	let grandpa_protocol_name = grandpa::protocol_standard_name(
 		&client.block_hash(0).ok().flatten().expect("Genesis block exists; qed"),
 		&config.chain_spec,
 	);
 	let (grandpa_protocol_config, grandpa_notification_service) =
-		grandpa::grandpa_peers_set_config(grandpa_protocol_name.clone());
+		grandpa::grandpa_peers_set_config::<_, N>(grandpa_protocol_name.clone());
 	net_config.add_notification_protocol(grandpa_protocol_config);
 
 	let (statement_handler_proto, statement_config) =
-		sc_network_statement::StatementHandlerPrototype::new(
+		sc_network_statement::StatementHandlerPrototype::new::<_, _, N>(
 			client
 				.block_hash(0u32.into())
 				.ok()
@@ -406,7 +409,7 @@ pub fn new_full_base(
 		backend: backend.clone(),
 		client: client.clone(),
 		keystore: keystore_container.keystore(),
-		network: network.clone(),
+		network: Arc::new(network.clone()), // TODO: get rid of if possible
 		rpc_builder: Box::new(rpc_builder),
 		transaction_pool: transaction_pool.clone(),
 		task_manager: &mut task_manager,
@@ -511,7 +514,7 @@ pub fn new_full_base(
 					..Default::default()
 				},
 				client.clone(),
-				network.clone(),
+				Arc::new(network.clone()), // TODO: get rid of if possible
 				Box::pin(dht_event_stream),
 				authority_discovery_role,
 				prometheus_registry.clone(),
@@ -600,7 +603,7 @@ pub fn new_full_base(
 				transaction_pool: Some(OffchainTransactionPoolFactory::new(
 					transaction_pool.clone(),
 				)),
-				network_provider: network.clone(),
+				network_provider: Arc::new(network.clone()), // TODO: get rid of if possible
 				is_validator: role.is_authority(),
 				enable_http_requests: true,
 				custom_extensions: move |_| {
@@ -626,8 +629,29 @@ pub fn new_full_base(
 /// Builds a new service for a full client.
 pub fn new_full(config: Configuration, cli: Cli) -> Result<TaskManager, ServiceError> {
 	let database_source = config.database.clone();
-	let task_manager = new_full_base(config, cli.no_hardware_benchmarks, |_, _| ())
-		.map(|NewFullBase { task_manager, .. }| task_manager)?;
+	// let task_manager = new_full_base(config, cli.no_hardware_benchmarks, |_, _| ())
+	// 	.map(|NewFullBase { task_manager, .. }| task_manager)?;
+
+	let task_manager = match config.network.network_backend {
+		sc_network::config::NetworkBackendType::Libp2p => {
+			let task_manager = new_full_base::<sc_network::NetworkWorker<_, _>>(
+				config,
+				cli.no_hardware_benchmarks,
+				|_, _| (),
+			)
+			.map(|NewFullBase { task_manager, .. }| task_manager)?;
+			task_manager
+		},
+		sc_network::config::NetworkBackendType::Litep2p => {
+			let task_manager = new_full_base::<sc_network::Litep2pNetworkBackend>(
+				config,
+				cli.no_hardware_benchmarks,
+				|_, _| (),
+			)
+			.map(|NewFullBase { task_manager, .. }| task_manager)?;
+			task_manager
+		},
+	};
 
 	sc_storage_monitor::StorageMonitorService::try_spawn(
 		cli.storage_monitor,
@@ -702,7 +726,7 @@ mod tests {
 			|config| {
 				let mut setup_handles = None;
 				let NewFullBase { task_manager, client, network, sync, transaction_pool, .. } =
-					new_full_base(
+					new_full_base::<sc_network::NetworkWorker<_, _>>(
 						config,
 						false,
 						|block_import: &sc_consensus_babe::BabeBlockImport<Block, _, _>,
@@ -878,7 +902,7 @@ mod tests {
 			crate::chain_spec::tests::integration_test_config_with_two_authorities(),
 			|config| {
 				let NewFullBase { task_manager, client, network, sync, transaction_pool, .. } =
-					new_full_base(config, false, |_, _| ())?;
+					new_full_base::<sc_network::NetworkWorker<_, _>>(config, false, |_, _| ())?;
 				Ok(sc_service_test::TestNetComponents::new(
 					task_manager,
 					client,
