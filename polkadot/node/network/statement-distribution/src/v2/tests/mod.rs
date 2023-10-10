@@ -169,10 +169,19 @@ impl TestState {
 					collator: None,
 				})
 			}),
+			disabled_validators: Default::default(),
 			para_data: (0..self.session_info.validator_groups.len())
 				.map(|i| (ParaId::from(i as u32), PerParaData::new(1, vec![1, 2, 3].into())))
 				.collect(),
 		}
+	}
+
+	fn make_dummy_leaf_with_disabled_validators(
+		&self,
+		relay_parent: Hash,
+		disabled_validators: Vec<ValidatorIndex>,
+	) -> TestLeaf {
+		TestLeaf { disabled_validators, ..self.make_dummy_leaf(relay_parent) }
 	}
 
 	fn make_availability_cores(&self, f: impl Fn(usize) -> CoreState) -> Vec<CoreState> {
@@ -340,6 +349,7 @@ struct TestLeaf {
 	parent_hash: Hash,
 	session: SessionIndex,
 	availability_cores: Vec<CoreState>,
+	disabled_validators: Vec<ValidatorIndex>,
 	para_data: Vec<(ParaId, PerParaData)>,
 }
 
@@ -375,7 +385,15 @@ async fn handle_leaf_activation(
 	test_state: &TestState,
 	is_new_session: bool,
 ) {
-	let TestLeaf { number, hash, parent_hash, para_data, session, availability_cores } = leaf;
+	let TestLeaf {
+		number,
+		hash,
+		parent_hash,
+		para_data,
+		session,
+		availability_cores,
+		disabled_validators,
+	} = leaf;
 
 	assert_matches!(
 		virtual_overseer.recv().await,
@@ -428,6 +446,14 @@ async fn handle_leaf_activation(
 		AllMessages::RuntimeApi(
 			RuntimeApiMessage::Request(parent, RuntimeApiRequest::AvailabilityCores(tx))) if parent == *hash => {
 			tx.send(Ok(availability_cores.clone())).unwrap();
+		}
+	);
+
+	assert_matches!(
+		virtual_overseer.recv().await,
+		AllMessages::RuntimeApi(
+			RuntimeApiMessage::Request(parent, RuntimeApiRequest::DisabledValidators(tx))) if parent == *hash => {
+			tx.send(Ok(disabled_validators.clone())).unwrap();
 		}
 	);
 

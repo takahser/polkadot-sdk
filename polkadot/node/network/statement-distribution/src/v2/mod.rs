@@ -95,6 +95,7 @@ const COST_UNEXPECTED_STATEMENT: Rep = Rep::CostMinor("Unexpected Statement");
 const COST_UNEXPECTED_STATEMENT_MISSING_KNOWLEDGE: Rep =
 	Rep::CostMinor("Unexpected Statement, missing knowledge for relay parent");
 const COST_EXCESSIVE_SECONDED: Rep = Rep::CostMinor("Sent Excessive `Seconded` Statements");
+const COST_DISABLED_VALIDATOR: Rep = Rep::CostMajor("Sent a statement from a disabled validator");
 
 const COST_UNEXPECTED_MANIFEST_MISSING_KNOWLEDGE: Rep =
 	Rep::CostMinor("Unexpected Manifest, missing knowlege for relay parent");
@@ -473,6 +474,18 @@ pub(crate) async fn handle_active_leaves_update<Context>(
 		.map_err(JfyiError::RuntimeApiUnavailable)?
 		.map_err(JfyiError::FetchAvailabilityCores)?;
 
+		let disabled_validators = polkadot_node_subsystem_util::request_disabled_validators(
+			new_relay_parent,
+			ctx.sender(),
+		)
+		.await
+		.await
+		.map_err(JfyiError::RuntimeApiUnavailable)?
+		.map_err(JfyiError::FetchDisabledValidators)?;
+
+		// deduplicate and order
+		let disabled_validators = disabled_validators.into_iter().collect();
+
 		let group_rotation_info =
 			polkadot_node_subsystem_util::request_validator_groups(new_relay_parent, ctx.sender())
 				.await
@@ -533,7 +546,7 @@ pub(crate) async fn handle_active_leaves_update<Context>(
 			new_relay_parent,
 			PerRelayParentState {
 				local_validator,
-				statement_store: StatementStore::new(&per_session.groups),
+				statement_store: StatementStore::new(&per_session.groups, &disabled_validators),
 				availability_cores,
 				group_rotation_info,
 				seconding_limit,
@@ -1300,6 +1313,20 @@ async fn handle_incoming_statement<Context>(
 			},
 		};
 
+	if per_relay_parent
+		.statement_store
+		.is_disabled(&statement.unchecked_validator_index())
+	{
+		gum::debug!(
+			target: LOG_TARGET,
+			?relay_parent,
+			validator_index = ?statement.unchecked_validator_index(),
+			"Ignoring a statement from disabled validator."
+		);
+		modify_reputation(reputation, ctx.sender(), peer, COST_DISABLED_VALIDATOR).await;
+		return
+	}
+
 	let cluster_sender_index = {
 		// This block of code only returns `Some` when both the originator and
 		// the sending peer are in the cluster.
@@ -1412,13 +1439,24 @@ async fn handle_incoming_statement<Context>(
 		checked_statement.clone(),
 		StatementOrigin::Remote,
 	) {
-		Err(statement_store::ValidatorUnknown) => {
+		Err(statement_store::Error::ValidatorUnknown) => {
 			// sanity: should never happen.
 			gum::warn!(
 				target: LOG_TARGET,
 				?relay_parent,
 				validator_index = ?originator_index,
 				"Error - accepted message from unknown validator."
+			);
+
+			return
+		},
+		Err(statement_store::Error::ValidatorDisabled) => {
+			// sanity: should never happen, checked above.
+			gum::warn!(
+				target: LOG_TARGET,
+				?relay_parent,
+				validator_index = ?originator_index,
+				"Error - accepted message from disabled validator."
 			);
 
 			return
@@ -1906,7 +1944,7 @@ async fn handle_incoming_manifest_common<'a, Context>(
 	candidate_hash: CandidateHash,
 	relay_parent: Hash,
 	para_id: ParaId,
-	manifest_summary: grid::ManifestSummary,
+	mut manifest_summary: grid::ManifestSummary,
 	manifest_kind: grid::ManifestKind,
 	reputation: &mut ReputationAggregator,
 ) -> Option<ManifestImportSuccess<'a>> {
@@ -1984,6 +2022,16 @@ async fn handle_incoming_manifest_common<'a, Context>(
 	// 2. sanity checks: peer is validator, bitvec size, import into grid tracker
 	let group_index = manifest_summary.claimed_group_index;
 	let claimed_parent_hash = manifest_summary.claimed_parent_hash;
+
+	// Ignore votes from disabled validators when counting towards the threshold.
+	let disabled_mask = per_session
+		.groups
+		.get(group_index)
+		.map(|group| relay_parent_state.statement_store.disabled_bitmask(group))
+		.unwrap_or_default();
+	manifest_summary.statement_knowledge.mask_seconded(&disabled_mask);
+	manifest_summary.statement_knowledge.mask_valid(&disabled_mask);
+
 	let acknowledge = match local_validator.grid_tracker.import_manifest(
 		grid_topology,
 		&per_session.groups,
@@ -2743,10 +2791,19 @@ pub(crate) fn answer_request(state: &mut State, message: ResponderMessage) {
 
 	// Transform mask with 'OR' semantics into one with 'AND' semantics for the API used
 	// below.
-	let and_mask = StatementFilter {
+	let mut and_mask = StatementFilter {
 		seconded_in_group: !mask.seconded_in_group.clone(),
 		validated_in_group: !mask.validated_in_group.clone(),
 	};
+
+	// Ignore disabled validators when sending the response.
+	let disabled_mask = per_session
+		.groups
+		.get(confirmed.group_index())
+		.map(|group| relay_parent_state.statement_store.disabled_bitmask(group))
+		.unwrap_or_default();
+	and_mask.mask_seconded(&disabled_mask);
+	and_mask.mask_valid(&disabled_mask);
 
 	let response = AttestedCandidateResponse {
 		candidate_receipt: (&**confirmed.candidate_receipt()).clone(),

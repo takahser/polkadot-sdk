@@ -1101,6 +1101,93 @@ fn peer_reported_for_providing_statements_with_wrong_validator_id() {
 }
 
 #[test]
+fn peer_reported_for_providing_statement_from_disabled_validator() {
+	let group_size = 3;
+	let config = TestConfig {
+		validator_count: 20,
+		group_size,
+		local_validator: true,
+		async_backing_params: None,
+	};
+
+	let relay_parent = Hash::repeat_byte(1);
+	let peer_a = PeerId::random();
+
+	test_harness(config, |state, mut overseer| async move {
+		let local_validator = state.local.clone().unwrap();
+		let local_para = ParaId::from(local_validator.group_index.0);
+
+		let other_group_validators = state.group_validators(local_validator.group_index, true);
+		let v_a = other_group_validators[0];
+
+		let disabled_validators = vec![v_a];
+		let test_leaf =
+			state.make_dummy_leaf_with_disabled_validators(relay_parent, disabled_validators);
+
+		let (candidate, _) = make_candidate(
+			relay_parent,
+			1,
+			local_para,
+			test_leaf.para_data(local_para).head_data.clone(),
+			vec![4, 5, 6].into(),
+			Hash::repeat_byte(42).into(),
+		);
+		let candidate_hash = candidate.hash();
+
+		// peer A is in group, has relay parent in view.
+		{
+			connect_peer(
+				&mut overseer,
+				peer_a.clone(),
+				Some(vec![state.discovery_id(v_a)].into_iter().collect()),
+			)
+			.await;
+			send_peer_view_change(&mut overseer, peer_a.clone(), view![relay_parent]).await;
+		}
+
+		activate_leaf(&mut overseer, &test_leaf, &state, true).await;
+
+		answer_expected_hypothetical_depth_request(
+			&mut overseer,
+			vec![],
+			Some(relay_parent),
+			false,
+		)
+		.await;
+
+		// Send a request to peer and mock its response to include a disabled validator statement.
+		{
+			let a_seconded_disabled = state
+				.sign_statement(
+					v_a,
+					CompactStatement::Seconded(candidate_hash),
+					&SigningContext { parent_hash: relay_parent, session_index: 1 },
+				)
+				.as_unchecked()
+				.clone();
+
+			send_peer_message(
+				&mut overseer,
+				peer_a.clone(),
+				protocol_v2::StatementDistributionMessage::Statement(
+					relay_parent,
+					a_seconded_disabled,
+				),
+			)
+			.await;
+
+			assert_matches!(
+				overseer.recv().await,
+				AllMessages::NetworkBridgeTx(NetworkBridgeTxMessage::ReportPeer(ReportPeerMessage::Single(p, r)))
+					if p == peer_a && r == COST_DISABLED_VALIDATOR.into() => { }
+			);
+		}
+
+		overseer
+	});
+}
+
+#[test]
 fn local_node_sanity_checks_incoming_requests() {
 	let config = TestConfig {
 		validator_count: 20,

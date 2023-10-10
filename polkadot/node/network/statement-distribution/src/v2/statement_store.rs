@@ -28,7 +28,10 @@ use polkadot_node_network_protocol::v2::StatementFilter;
 use polkadot_primitives::{
 	CandidateHash, CompactStatement, GroupIndex, SignedStatement, ValidatorIndex,
 };
-use std::collections::hash_map::{Entry as HEntry, HashMap};
+use std::collections::{
+	hash_map::{Entry as HEntry, HashMap},
+	BTreeSet,
+};
 
 use super::groups::Groups;
 
@@ -68,7 +71,7 @@ pub struct StatementStore {
 
 impl StatementStore {
 	/// Create a new [`StatementStore`]
-	pub fn new(groups: &Groups) -> Self {
+	pub fn new(groups: &Groups, disabled: &BTreeSet<ValidatorIndex>) -> Self {
 		let mut validator_meta = HashMap::new();
 		for (g, group) in groups.all().iter().enumerate() {
 			for (i, v) in group.iter().enumerate() {
@@ -78,6 +81,7 @@ impl StatementStore {
 						seconded_count: 0,
 						within_group_index: i,
 						group: GroupIndex(g as _),
+						is_disabled: disabled.contains(v),
 					},
 				);
 			}
@@ -91,18 +95,21 @@ impl StatementStore {
 	}
 
 	/// Insert a statement. Returns `true` if was not known already, `false` if it was.
-	/// Ignores statements by unknown validators and returns an error.
+	/// Ignores statements by unknown and disabled validators and returns an error.
 	pub fn insert(
 		&mut self,
 		groups: &Groups,
 		statement: SignedStatement,
 		origin: StatementOrigin,
-	) -> Result<bool, ValidatorUnknown> {
+	) -> Result<bool, Error> {
 		let validator_index = statement.validator_index();
 		let validator_meta = match self.validator_meta.get_mut(&validator_index) {
-			None => return Err(ValidatorUnknown),
+			None => return Err(Error::ValidatorUnknown),
 			Some(m) => m,
 		};
+		if validator_meta.is_disabled {
+			return Err(Error::ValidatorDisabled)
+		}
 
 		let compact = statement.payload().clone();
 		let fingerprint = (validator_index, compact.clone());
@@ -134,7 +141,7 @@ impl StatementStore {
 						"groups passed into `insert` differ from those used at store creation"
 					);
 
-					return Err(ValidatorUnknown)
+					return Err(Error::ValidatorUnknown)
 				},
 			};
 
@@ -152,6 +159,25 @@ impl StatementStore {
 		}
 
 		Ok(true)
+	}
+
+	/// Returns true if the validator is disabled as of current relay parent.
+	pub fn is_disabled(&self, index: &ValidatorIndex) -> bool {
+		self.validator_meta.get(&index).map(|m| m.is_disabled).unwrap_or(false)
+	}
+
+	/// A convenience funtion to generate a disabled bitmask for the given backing group.
+	/// The output bits are set to `true` for validators that are disabled.
+	/// The group size should match the size of the backing group.
+	pub fn disabled_bitmask(&self, group: &[ValidatorIndex]) -> BitVec<u8, BitOrderLsb0> {
+		let group_size = group.len();
+		let mut mask = BitVec::repeat(false, group_size);
+		for i in group {
+			if self.is_disabled(i) {
+				mask.set(i.0 as usize, true);
+			}
+		}
+		mask
 	}
 
 	/// Fill a `StatementFilter` to be used in the grid topology with all statements
@@ -250,7 +276,12 @@ impl StatementStore {
 }
 
 /// Error indicating that the validator was unknown.
-pub struct ValidatorUnknown;
+pub enum Error {
+	/// The validator was unknown.
+	ValidatorUnknown,
+	/// A statement from a disabled validator should be rejected.
+	ValidatorDisabled,
+}
 
 type Fingerprint = (ValidatorIndex, CompactStatement);
 
@@ -258,6 +289,7 @@ struct ValidatorMeta {
 	group: GroupIndex,
 	within_group_index: usize,
 	seconded_count: usize,
+	is_disabled: bool,
 }
 
 struct GroupStatements {
