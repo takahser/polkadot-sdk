@@ -1155,7 +1155,6 @@ fn peer_reported_for_providing_statement_from_disabled_validator() {
 		)
 		.await;
 
-		// Send a request to peer and mock its response to include a disabled validator statement.
 		{
 			let a_seconded_disabled = state
 				.sign_statement(

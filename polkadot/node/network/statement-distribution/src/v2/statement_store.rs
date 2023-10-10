@@ -275,7 +275,7 @@ impl StatementStore {
 	}
 }
 
-/// Error indicating that the validator was unknown.
+/// Error indicating that the validator was unknown or disabled.
 pub enum Error {
 	/// The validator was unknown.
 	ValidatorUnknown,
