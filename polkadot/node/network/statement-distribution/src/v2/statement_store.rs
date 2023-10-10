@@ -172,9 +172,9 @@ impl StatementStore {
 	pub fn disabled_bitmask(&self, group: &[ValidatorIndex]) -> BitVec<u8, BitOrderLsb0> {
 		let group_size = group.len();
 		let mut mask = BitVec::repeat(false, group_size);
-		for i in group {
-			if self.is_disabled(i) {
-				mask.set(i.0 as usize, true);
+		for (i, v) in group.iter().enumerate() {
+			if self.is_disabled(v) {
+				mask.set(i, true);
 			}
 		}
 		mask
