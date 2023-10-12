@@ -2622,6 +2622,8 @@ pub(crate) async fn handle_response<Context>(
 			Some(g) => g,
 		};
 
+		let disabled_mask = relay_parent_state.statement_store.disabled_bitmask(group);
+
 		let res = response.validate_response(
 			&mut state.request_manager,
 			group,
@@ -2636,6 +2638,7 @@ pub(crate) async fn handle_response<Context>(
 
 				Some(g_index) == expected_group
 			},
+			disabled_mask,
 		);
 
 		for (peer, rep) in res.reputation_changes {
